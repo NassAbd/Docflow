@@ -1,0 +1,354 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { uploadDocuments, listDocuments, getExtraction, deleteDocument } from '../api/client';
+import type { DocumentResponse, ExtractionResult } from '../types';
+
+const STATUS_LABELS: Record<string, string> = {
+  uploaded: '📦 Uploadé',
+  processing: '⚙️ Traitement…',
+  extracted: '🔍 Extrait',
+  curated: '✅ Curé',
+  error: '❌ Erreur',
+};
+
+const TYPE_LABELS: Record<string, string> = {
+  facture: 'Facture',
+  devis: 'Devis',
+  attestation: 'Attestation',
+  autre: 'Autre',
+};
+
+export function UploadPage() {
+  const [dragging, setDragging] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [documents, setDocuments] = useState<DocumentResponse[]>([]);
+  const [uploadedFiles, setUploadedFiles] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [selectedDoc, setSelectedDoc] = useState<DocumentResponse | null>(null);
+  const [extraction, setExtraction] = useState<ExtractionResult | null>(null);
+  const [loadingExtraction, setLoadingExtraction] = useState(false);
+  
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Polling for documents not yet in final state
+  useEffect(() => {
+    const needsPolling = documents.some(
+      (d) => !['curated', 'error'].includes(d.status)
+    );
+
+    if (needsPolling) {
+      const timer = setInterval(refreshDocuments, 3000);
+      return () => clearInterval(timer);
+    }
+  }, [documents]);
+
+  // Initial load
+  useEffect(() => {
+    refreshDocuments();
+  }, []);
+
+  const handleFiles = async (files: FileList) => {
+    const pdfs = Array.from(files).filter((f) => f.type === 'application/pdf');
+    if (pdfs.length === 0) return;
+
+    setUploading(true);
+    try {
+      const result = await uploadDocuments(pdfs);
+      setUploadedFiles(result.map((d) => d.original_filename));
+      await refreshDocuments();
+    } catch (err) {
+      console.error('Upload error:', err);
+    } finally {
+      setUploading(false);
+      setTimeout(() => setUploadedFiles([]), 5000);
+    }
+  };
+
+  const refreshDocuments = async () => {
+    setLoading(true);
+    try {
+      const docs = await listDocuments();
+      setDocuments(docs);
+    } catch (err) {
+      console.error('List error:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const openDetails = async (doc: DocumentResponse) => {
+    if (!['extracted', 'curated'].includes(doc.status)) return;
+    setSelectedDoc(doc);
+    setLoadingExtraction(true);
+    try {
+      const result = await getExtraction(doc.id);
+      setExtraction(result);
+    } catch (err) {
+      console.error('Extraction error:', err);
+    } finally {
+      setLoadingExtraction(false);
+    }
+  };
+
+  const closeDetails = () => {
+    setSelectedDoc(null);
+    setExtraction(null);
+  };
+
+  const handleDelete = async (id: string) => {
+    if (!confirm('Êtes-vous sûr de vouloir supprimer ce document à tous les niveaux ?')) return;
+    try {
+      await deleteDocument(id);
+      setDocuments((prev) => prev.filter((d) => d.id !== id));
+    } catch (err) {
+      console.error('Delete error:', err);
+      alert('Erreur lors de la suppression');
+    }
+  };
+
+  const onDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setDragging(false);
+    if (e.dataTransfer.files) handleFiles(e.dataTransfer.files);
+  }, [handleFiles]);
+
+  const onDragOver = (e: React.DragEvent) => { e.preventDefault(); setDragging(true); };
+  const onDragLeave = () => setDragging(false);
+
+  return (
+    <div className="animate-slide-up">
+      <div className="page-header">
+        <h1>Traitement de Documents</h1>
+        <p>Uploadez vos pièces comptables — elles seront classifiées, extraites et analysées automatiquement.</p>
+      </div>
+
+      {/* Drop Zone */}
+      <div
+        id="upload-dropzone"
+        className={`drop-zone ${dragging ? 'dragging' : ''}`}
+        onClick={() => inputRef.current?.click()}
+        onDrop={onDrop}
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        style={{ marginBottom: '2rem' }}
+      >
+        <input
+          ref={inputRef}
+          type="file"
+          multiple
+          accept=".pdf,application/pdf"
+          style={{ display: 'none' }}
+          onChange={(e) => e.target.files && handleFiles(e.target.files)}
+        />
+
+        {uploading ? (
+          <>
+            <span className="drop-zone-icon">⏳</span>
+            <h2 className="loading-text">Upload en cours…</h2>
+            <p>Vos fichiers sont en cours de transfert vers la zone Bronze</p>
+            <div className="progress-bar" style={{ maxWidth: 300, margin: '1rem auto 0' }}>
+              <div className="progress-fill" style={{ width: '100%' }} />
+            </div>
+          </>
+        ) : (
+          <>
+            <span className="drop-zone-icon">☁️</span>
+            <h2>Déposez vos PDF ici</h2>
+            <p>ou cliquez pour sélectionner — Formats acceptés : PDF uniquement</p>
+            <div style={{ marginTop: '1.5rem' }}>
+              <button id="upload-btn" className="btn btn-primary" onClick={(e) => e.stopPropagation()}>
+                📂 Choisir des fichiers
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Upload feedback */}
+      {uploadedFiles.length > 0 && (
+        <div className="card" style={{ marginBottom: '2rem', borderColor: 'rgba(0,212,170,0.3)', background: 'rgba(0,212,170,0.05)' }}>
+          <p className="section-title" style={{ color: 'var(--color-accent)' }}>✅ {uploadedFiles.length} fichier(s) uploadé(s)</p>
+          <div className="flex gap-1" style={{ flexWrap: 'wrap', marginTop: '0.5rem' }}>
+            {uploadedFiles.map((f) => (
+              <span key={f} className="badge badge-faible" style={{ textTransform: 'none' }}>{f}</span>
+            ))}
+          </div>
+          <p className="text-sm text-muted" style={{ marginTop: '0.75rem' }}>
+            ⚙️ Le pipeline OCR + LLM a démarré. Les documents passeront automatiquement par les zones Bronze, Silver et Gold.
+          </p>
+        </div>
+      )}
+
+      {/* Document list */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
+        <p className="section-title">📋 Documents traités ({documents.length})</p>
+        <button id="refresh-btn" className="btn btn-ghost" onClick={refreshDocuments} disabled={loading}>
+          {loading ? <span className="spinner" style={{ width: 14, height: 14 }} /> : '🔄'} Rafraîchir
+        </button>
+      </div>
+
+      {documents.length === 0 ? (
+        <div className="empty-state">
+          <span className="empty-state-icon">📭</span>
+          <h3>Aucun document encore</h3>
+          <p>Uploadez vos premiers PDF pour démarrer le traitement</p>
+        </div>
+      ) : (
+        <div className="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>Fichier</th>
+                <th>Type</th>
+                <th>Statut</th>
+                <th>Pipeline</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {documents.sort((a, b) => new Date(b.upload_at).getTime() - new Date(a.upload_at).getTime()).map((doc) => (
+                <tr key={doc.id}>
+                  <td>
+                    <div className="flex-col">
+                      <span style={{ fontWeight: 600 }}>{doc.original_filename}</span>
+                      <span className="text-muted" style={{ fontSize: '0.7rem' }}>{new Date(doc.upload_at).toLocaleString('fr-FR')}</span>
+                    </div>
+                  </td>
+                  <td>
+                    {doc.document_type ? (
+                      <span className={`badge badge-${doc.document_type}`}>
+                        {TYPE_LABELS[doc.document_type]}
+                      </span>
+                    ) : (
+                      <span className="text-muted text-sm">—</span>
+                    )}
+                  </td>
+                  <td>
+                    <span className={`badge badge-${doc.status}`}>
+                      {STATUS_LABELS[doc.status] ?? doc.status}
+                    </span>
+                  </td>
+                  <td>
+                    <div className="pipeline-steps">
+                      <span className={`pipeline-step ${['extracted','curated'].includes(doc.status) ? 'done' : doc.status === 'uploaded' ? 'active' : ''}`}>Bronze</span>
+                      <span className="pipeline-step-sep">→</span>
+                      <span className={`pipeline-step ${['curated'].includes(doc.status) ? 'done' : doc.status === 'processing' || doc.status === 'extracted' ? 'active' : ''}`}>Silver</span>
+                      <span className="pipeline-step-sep">→</span>
+                      <span className={`pipeline-step ${doc.status === 'curated' ? 'done' : ''}`}>Gold</span>
+                    </div>
+                  </td>
+                  <td>
+                    <div className="flex gap-1">
+                      <button 
+                        className="btn btn-ghost" 
+                        style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem' }}
+                        disabled={!['extracted', 'curated'].includes(doc.status)}
+                        onClick={() => openDetails(doc)}
+                      >
+                        👁️ Voir
+                      </button>
+                      <button 
+                        className="btn btn-ghost" 
+                        style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem', color: 'var(--color-danger)' }}
+                        onClick={() => handleDelete(doc.id)}
+                      >
+                        🗑️
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Details Modal */}
+      {selectedDoc && (
+        <div className="modal-overlay" onClick={closeDetails}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="flex items-center gap-2">
+                <span className={`badge badge-${selectedDoc.document_type ?? 'autre'}`}>
+                  {TYPE_LABELS[selectedDoc.document_type ?? 'autre']}
+                </span>
+                <h2 style={{ fontSize: '1.2rem', fontWeight: 700 }}>{selectedDoc.original_filename}</h2>
+              </div>
+              <button className="modal-close" onClick={closeDetails}>&times;</button>
+            </div>
+            <div className="modal-body">
+              {loadingExtraction ? (
+                <div className="flex items-center justify-center gap-2 p-4">
+                  <div className="spinner" />
+                  <span>Chargement des données extraites…</span>
+                </div>
+              ) : extraction ? (
+                <div className="flex-col gap-2">
+                  <div className="grid-2">
+                    <div className="card-glass">
+                      <p className="text-sm text-muted mb-1">ÉMETTEUR</p>
+                      <p style={{ fontWeight: 700 }}>{extraction.emetteur_nom || 'Inconnu'}</p>
+                      <p className="text-sm text-muted">{extraction.emetteur_adresse || '—'}</p>
+                      <div className="mt-2 flex items-center gap-1">
+                        <span className="text-sm">SIREN :</span>
+                        <code className="font-mono text-sm" style={{ color: 'var(--color-primary)' }}>{extraction.siren || '—'}</code>
+                      </div>
+                    </div>
+                    <div className="card-glass">
+                      <p className="text-sm text-muted mb-1">DESTINATAIRE</p>
+                      <p style={{ fontWeight: 700 }}>{extraction.destinataire_nom || 'Inconnu'}</p>
+                      <p className="text-sm text-muted">{extraction.destinataire_adresse || '—'}</p>
+                      <div className="mt-2 flex items-center gap-1">
+                        <span className="text-sm">SIRET :</span>
+                        <code className="font-mono text-sm">{extraction.siret || '—'}</code>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="stat-grid" style={{ marginTop: '1.5rem', marginBottom: '1.5rem' }}>
+                    <div className="stat-card">
+                      <span className="stat-label">Total TTC</span>
+                      <span className="stat-value" style={{ fontSize: '1.5rem' }}>{extraction.montants.ttc?.toLocaleString('fr-FR')} {extraction.montants.currency}</span>
+                    </div>
+                    <div className="stat-card">
+                      <span className="stat-label">HT / TVA</span>
+                      <span className="stat-value" style={{ fontSize: '1rem' }}>{extraction.montants.ht?.toLocaleString('fr-FR')} / {extraction.montants.tva?.toLocaleString('fr-FR')}</span>
+                    </div>
+                    <div className="stat-card">
+                      <span className="stat-label">Date émission</span>
+                      <span className="stat-value" style={{ fontSize: '1.2rem' }}>{extraction.date_emission || '—'}</span>
+                    </div>
+                    <div className="stat-card">
+                      <span className="stat-label">N° Document</span>
+                      <span className="stat-value" style={{ fontSize: '1.2rem' }}>{extraction.numero_document || '—'}</span>
+                    </div>
+                  </div>
+
+                  <div>
+                    <p className="text-sm text-muted mb-1">TEXTE BRUT (OCR)</p>
+                    <pre style={{ 
+                      fontSize: '0.75rem', 
+                      background: 'rgba(0,0,0,0.2)', 
+                      padding: '1rem', 
+                      borderRadius: 'var(--radius-sm)',
+                      maxHeight: '200px',
+                      overflowY: 'auto',
+                      whiteSpace: 'pre-wrap',
+                      fontFamily: 'monospace'
+                    }}>
+                      {extraction.raw_text}
+                    </pre>
+                  </div>
+                </div>
+              ) : (
+                <p>Impossible de charger les données.</p>
+              )}
+            </div>
+            <div className="modal-header" style={{ top: 'auto', bottom: 0, borderTop: '1px solid var(--color-border)', borderBottom: 'none' }}>
+              <button className="btn btn-ghost w-full" onClick={closeDetails}>Fermer</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
