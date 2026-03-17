@@ -55,12 +55,14 @@ services:
       - _AIRFLOW_WWW_USER_CREATE=true
       - _AIRFLOW_WWW_USER_USERNAME=admin
       - _AIRFLOW_WWW_USER_PASSWORD=admin
+      - _PIP_ADDITIONAL_REQUIREMENTS=reportlab<4.0.0 requests
     ports:
       - "8080:8080"
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - /var/run/docker.sock:/var/run/docker.sock
-    user: root
+      - ./test_documents:/opt/airflow/test_documents
+    user: "${AIRFLOW_UID:-50000}:0"
     command: standalone
     networks:
       - docflow-net
