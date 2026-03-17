@@ -40,3 +40,4 @@ class DocumentResponse(BaseModel):
     document_type: DocumentType | None = None
     upload_at: datetime
     error_message: str | None = None
+    uploaded_by: str | None = None

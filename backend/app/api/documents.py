@@ -95,23 +95,30 @@ async def list_documents(payload: dict = Depends(require_auth)) -> list[Document
     user_id: str = payload["sub"]
     is_admin = _is_admin(payload)
 
+    # Construire une map doc_id -> uploaded_by depuis les bronze records
+    bronze_records = datalake.load_all_bronze()
+    bronze_map: dict[str, str] = {
+        str(b.document.id): (b.document.uploaded_by or "")
+        for b in bronze_records
+    }
+
+    # Filtrer selon le rôle
+    if is_admin:
+        owned_ids = None  # accès à tout
+    else:
+        owned_ids = {doc_id for doc_id, owner in bronze_map.items() if owner == user_id}
+
     gold_records = datalake.load_all_gold()
     silver_records = datalake.load_all_silver()
 
-    # Résoudre les document_ids accessibles pour cet utilisateur
-    if not is_admin:
-        owned_ids = _get_owned_ids(user_id)
-    else:
-        owned_ids = None  # None = accès à tout
-
-    gold_ids: set[str] = set()
+    processed_ids: set[str] = set()
     responses: list[DocumentResponse] = []
 
     for gold in gold_records:
         doc_id_str = str(gold.document_id)
         if owned_ids is not None and doc_id_str not in owned_ids:
             continue
-        gold_ids.add(doc_id_str)
+        processed_ids.add(doc_id_str)
         responses.append(DocumentResponse(
             id=gold.document_id,
             filename=doc_id_str,
@@ -119,14 +126,16 @@ async def list_documents(payload: dict = Depends(require_auth)) -> list[Document
             status=ProcessingStatus.CURATED,
             document_type=gold.document_type,
             upload_at=gold.curated_at,
+            uploaded_by=bronze_map.get(doc_id_str),
         ))
 
     for silver in silver_records:
         doc_id_str = str(silver.document_id)
-        if doc_id_str in gold_ids:
+        if doc_id_str in processed_ids:
             continue
         if owned_ids is not None and doc_id_str not in owned_ids:
             continue
+        processed_ids.add(doc_id_str)
         responses.append(DocumentResponse(
             id=silver.document_id,
             filename=doc_id_str,
@@ -134,25 +143,27 @@ async def list_documents(payload: dict = Depends(require_auth)) -> list[Document
             status=ProcessingStatus.EXTRACTED,
             document_type=silver.document_type,
             upload_at=silver.processed_at,
+            uploaded_by=bronze_map.get(doc_id_str),
+        ))
+
+    # Inclure les Bronze (encore en cours de traitement)
+    for bronze in bronze_records:
+        doc_id_str = str(bronze.document.id)
+        if doc_id_str in processed_ids:
+            continue
+        if owned_ids is not None and doc_id_str not in owned_ids:
+            continue
+        responses.append(DocumentResponse(
+            id=bronze.document.id,
+            filename=bronze.document.filename,
+            original_filename=bronze.document.original_filename,
+            status=bronze.document.status,
+            upload_at=bronze.document.upload_at,
+            uploaded_by=bronze.document.uploaded_by,
         ))
 
     return responses
 
-
-def _get_owned_ids(user_id: str) -> set[str]:
-    """Retourne les document_ids appartenant à cet user (via bronze records)."""
-    owned: set[str] = set()
-    bronze_dir = Path("./storage/bronze")
-    if not bronze_dir.exists():
-        return owned
-    for p in bronze_dir.glob("*.json"):
-        try:
-            record = datalake.load_bronze_from_path(p)
-            if record and record.document.uploaded_by == user_id:
-                owned.add(str(record.document.id))
-        except Exception:
-            continue
-    return owned
 
 
 @router.get("/{document_id}", response_model=DocumentResponse)

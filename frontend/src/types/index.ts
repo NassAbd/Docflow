@@ -34,6 +34,7 @@ export interface DocumentResponse {
   document_type: DocumentType | null;
   upload_at: string;
   error_message: string | null;
+  uploaded_by: string | null;
 }
 
 export interface MonetaryAmount {
