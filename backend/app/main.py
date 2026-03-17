@@ -1,17 +1,18 @@
-"""Point d'entrée FastAPI — DocFlow Backend."""
+"""Point d'entree FastAPI - DocFlow Backend."""
+
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from datetime import datetime, timezone
-
 from app.api import alerts, auth, business, documents
 from app.database import close_connection, get_db
+from app.db.mongodb import connect_to_mongo, disconnect_from_mongo, mongo_health
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(name)s | %(message)s")
@@ -37,24 +38,31 @@ async def _seed_admin(db) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Créer les dossiers Data Lake au démarrage
+    # Create Data Lake folders before serving requests.
     base = Path(os.getenv("STORAGE_BASE_PATH", "./storage"))
     for zone in ["bronze", "silver", "gold"]:
         (base / zone).mkdir(parents=True, exist_ok=True)
-    logger.info("Data Lake initialisé : %s", base.resolve())
+    logger.info("Data Lake initialise : %s", base.resolve())
 
-    # Index MongoDB + seed admin
+    # Connexion MongoDB synchrone (datalake)
+    try:
+        connect_to_mongo()
+    except Exception as exc:
+        logger.warning("Connexion MongoDB sync echouee : %s", exc)
+
+    # Connexion MongoDB async (auth) + seed admin
     db = get_db()
     await db.users.create_index("email", unique=True)
     await _seed_admin(db)
-    logger.info("MongoDB connecté et index users créé")
+    logger.info("MongoDB async connecte et index users cree")
 
-    # Logger le provider LLM
     provider = os.getenv("LLM_PROVIDER", "ollama").lower()
-    logger.info(f"LLM Provider configuré : {provider}")
+    logger.info("LLM Provider configure : %s", provider)
     yield
+
+    disconnect_from_mongo()
     await close_connection()
-    logger.info("Arrêt de DocFlow Backend")
+    logger.info("Arret de DocFlow Backend")
 
 
 app = FastAPI(
@@ -84,4 +92,5 @@ async def health_check():
         "status": "ok",
         "llm_provider": os.getenv("LLM_PROVIDER", "ollama"),
         "storage": os.getenv("STORAGE_BASE_PATH", "./storage"),
+        "mongodb": mongo_health(),
     }
