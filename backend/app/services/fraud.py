@@ -100,6 +100,35 @@ def _is_address_mismatch(extracted_address: str | None, adresse_etab: dict) -> b
     return postal_mismatch or city_mismatch or street_mismatch
 
 
+def _extract_declared_siren(raw_text: str | None) -> tuple[str | None, str | None]:
+    """Extrait la valeur SIREN déclarée dans le texte OCR brut."""
+    if not raw_text:
+        return None, None
+
+    for line in raw_text.splitlines():
+        if not re.search(r"\bsiren\b", line, flags=re.IGNORECASE):
+            continue
+
+        candidate = re.sub(
+            r"^.*?\bsiren\b\s*[:=]?\s*",
+            "",
+            line,
+            flags=re.IGNORECASE,
+        ).strip()
+        candidate = re.split(
+            r"\b(siret|montant|tva|ttc|date|facture|devis)\b",
+            candidate,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0].strip(" -\t")
+
+        digits = re.sub(r"\D", "", candidate)
+        if digits:
+            return digits, candidate
+
+    return None, None
+
+
 def detect_inconsistencies(records: list[SilverRecord]) -> list[InconsistencyAlert]:
     """
     Analyse un ensemble de SilverRecords et retourne toutes les alertes détectées.
@@ -125,7 +154,7 @@ def _check_siren_format(records: list[SilverRecord]) -> list[InconsistencyAlert]
         ext = rec.extraction
 
         if ext.siren is not None:
-            clean_siren = ext.siren.replace(" ", "")
+            clean_siren = re.sub(r"\D", "", ext.siren)
             if not re.fullmatch(r"\d{9}", clean_siren):
                 alerts.append(InconsistencyAlert(
                     id=str(uuid.uuid4()),
@@ -137,6 +166,27 @@ def _check_siren_format(records: list[SilverRecord]) -> list[InconsistencyAlert]
                     value_a=clean_siren,
                     suggestion="Vérifier le numéro SIREN du document source.",
                 ))
+            continue
+
+        raw_siren_digits, raw_siren_value = _extract_declared_siren(ext.raw_text)
+        if raw_siren_digits and not re.fullmatch(r"\d{9}", raw_siren_digits):
+            logger.warning(
+                "SIREN brut invalide détecté dans %s : %s",
+                rec.original_filename,
+                raw_siren_value,
+            )
+            alerts.append(InconsistencyAlert(
+                id=str(uuid.uuid4()),
+                alert_type=AlertType.SIREN_FORMAT_INVALID,
+                severity=AlertSeverity.HAUTE,
+                description=(
+                    f"SIREN '{raw_siren_value}' invalide dans '{rec.original_filename}'"
+                ),
+                document_ids=[rec.document_id],
+                field_in_conflict="siren",
+                value_a=raw_siren_value,
+                suggestion="Vérifier le numéro SIREN du document source.",
+            ))
     return alerts
 
 
