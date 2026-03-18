@@ -1,6 +1,7 @@
 """Routes API pour la gestion des documents."""
 import logging
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, status
@@ -22,12 +23,21 @@ def _is_admin(payload: dict) -> bool:
     return payload.get("role") == "admin"
 
 
-def _user_owns(document_id: uuid.UUID, user_id: str) -> bool:
+def _user_owns(document_id: uuid.UUID, user_id: str, user_email: str | None = None) -> bool:
     """Vérifie que le document appartient à l'utilisateur via le bronze record."""
     bronze = datalake.load_bronze(document_id)
     if not bronze:
         return False
-    return bronze.document.uploaded_by == user_id
+    # Priorité : owner_id (ObjectId fiable)
+    if bronze.document.owner_id:
+        return bronze.document.owner_id == user_id
+    # Rétrocompatibilité : anciens docs sans owner_id (uploaded_by = email ou ObjectId)
+    owner = bronze.document.uploaded_by
+    if owner and owner == user_id:
+        return True
+    if user_email and owner == user_email:
+        return True
+    return False
 
 
 @router.post("/upload", status_code=status.HTTP_201_CREATED)
@@ -43,6 +53,7 @@ async def upload_documents(
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     responses: list[DocumentResponse] = []
     user_id: str = payload["sub"]
+    user_display: str = payload.get("full_name") or payload.get("email", user_id)
 
     for file in files:
         if file.content_type not in ALLOWED_MIME:
@@ -63,7 +74,8 @@ async def upload_documents(
             filename=safe_filename,
             original_filename=file.filename or "document.pdf",
             file_size=len(content),
-            uploaded_by=user_id,
+            owner_id=user_id,
+            uploaded_by=user_display,
         )
 
         bronze = datalake.save_bronze(document, content)
@@ -95,10 +107,18 @@ async def list_documents(payload: dict = Depends(require_auth)) -> list[Document
     user_id: str = payload["sub"]
     is_admin = _is_admin(payload)
 
-    # Construire une map doc_id -> uploaded_by depuis les bronze records
+    # Construire les maps depuis les bronze records (source de vérité pour upload)
     bronze_records = datalake.load_all_bronze()
     bronze_map: dict[str, str] = {
         str(b.document.id): (b.document.uploaded_by or "")
+        for b in bronze_records
+    }
+    owner_map: dict[str, str] = {
+        str(b.document.id): (b.document.owner_id or b.document.uploaded_by or "")
+        for b in bronze_records
+    }
+    upload_at_map: dict[str, datetime] = {
+        str(b.document.id): b.document.upload_at
         for b in bronze_records
     }
 
@@ -106,7 +126,7 @@ async def list_documents(payload: dict = Depends(require_auth)) -> list[Document
     if is_admin:
         owned_ids = None  # accès à tout
     else:
-        owned_ids = {doc_id for doc_id, owner in bronze_map.items() if owner == user_id}
+        owned_ids = {doc_id for doc_id, owner in owner_map.items() if owner == user_id}
 
     gold_records = datalake.load_all_gold()
     silver_records = datalake.load_all_silver()
@@ -125,7 +145,7 @@ async def list_documents(payload: dict = Depends(require_auth)) -> list[Document
             original_filename=gold.original_filename,
             status=ProcessingStatus.CURATED,
             document_type=gold.document_type,
-            upload_at=gold.curated_at,
+            upload_at=upload_at_map.get(doc_id_str, gold.curated_at),
             uploaded_by=bronze_map.get(doc_id_str),
         ))
 
@@ -142,7 +162,7 @@ async def list_documents(payload: dict = Depends(require_auth)) -> list[Document
             original_filename=silver.original_filename,
             status=ProcessingStatus.EXTRACTED,
             document_type=silver.document_type,
-            upload_at=silver.processed_at,
+            upload_at=upload_at_map.get(doc_id_str, silver.processed_at),
             uploaded_by=bronze_map.get(doc_id_str),
         ))
 
@@ -172,8 +192,9 @@ async def get_document(
     payload: dict = Depends(require_auth),
 ) -> DocumentResponse:
     user_id: str = payload["sub"]
+    user_email: str | None = payload.get("email")
 
-    if not _is_admin(payload) and not _user_owns(document_id, user_id):
+    if not _is_admin(payload) and not _user_owns(document_id, user_id, user_email):
         raise HTTPException(status_code=403, detail="Accès refusé")
 
     gold = datalake.load_gold(document_id)
@@ -217,8 +238,9 @@ async def get_extraction(
     payload: dict = Depends(require_auth),
 ) -> JSONResponse:
     user_id: str = payload["sub"]
+    user_email: str | None = payload.get("email")
 
-    if not _is_admin(payload) and not _user_owns(document_id, user_id):
+    if not _is_admin(payload) and not _user_owns(document_id, user_id, user_email):
         raise HTTPException(status_code=403, detail="Accès refusé")
 
     silver = datalake.load_silver(document_id)
@@ -233,8 +255,9 @@ async def delete_document(
     payload: dict = Depends(require_auth),
 ) -> None:
     user_id: str = payload["sub"]
+    user_email: str | None = payload.get("email")
 
-    if not _is_admin(payload) and not _user_owns(document_id, user_id):
+    if not _is_admin(payload) and not _user_owns(document_id, user_id, user_email):
         raise HTTPException(status_code=403, detail="Accès refusé")
 
     success = datalake.delete_document(document_id)
