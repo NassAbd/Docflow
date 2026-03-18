@@ -3,7 +3,7 @@
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -31,7 +31,7 @@ async def _seed_admin(db) -> None:
         "full_name": "Administrateur",
         "hashed_password": pwd.hash(admin_password),
         "role": "admin",
-        "created_at": datetime.now(timezone.utc),
+        "created_at": datetime.now(UTC),
     })
     logger.info("Admin par défaut créé : %s", admin_email)
 

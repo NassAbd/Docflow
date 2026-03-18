@@ -6,9 +6,10 @@ from datetime import datetime
 from pathlib import Path
 from uuid import UUID
 
+from app.db.mongodb import get_collection
 from app.schemas.datalake import BronzeRecord, DataLakeManifest, GoldRecord, SilverRecord
 from app.schemas.document import ProcessingStatus, UploadedDocument
-from app.db.mongodb import get_collection
+from app.services.cloudinary_storage import delete_document as delete_cloudinary_document
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,11 @@ def save_bronze(document: UploadedDocument, file_bytes: bytes) -> BronzeRecord:
     return record
 
 
-def update_bronze_status(document_id: UUID, status: ProcessingStatus, error_message: str | None = None) -> None:
+def update_bronze_status(
+    document_id: UUID,
+    status: ProcessingStatus,
+    error_message: str | None = None,
+) -> None:
     """Met à jour le statut du document dans son record Bronze."""
     record = load_bronze(document_id)
     if record:
@@ -283,9 +288,19 @@ def delete_document(document_id: UUID) -> bool:
     # 1. Bronze : Supprimer le PDF et le JSON
     bronze = load_bronze(document_id)
     if bronze:
-        pdf_path = Path(bronze.file_path)
-        if pdf_path.exists():
-            pdf_path.unlink()
+        local_file_path = Path(bronze.file_path)
+        if local_file_path.exists():
+            local_file_path.unlink()
+
+        if bronze.document.cloudinary_public_id:
+            try:
+                delete_cloudinary_document(bronze.document.cloudinary_public_id)
+            except Exception as exc:
+                logger.warning(
+                    "Erreur suppression Cloudinary pour '%s' : %s",
+                    bronze.document.cloudinary_public_id,
+                    exc,
+                )
         
         record_path = _zone_path("bronze") / f"{doc_id_str}.json"
         if record_path.exists():

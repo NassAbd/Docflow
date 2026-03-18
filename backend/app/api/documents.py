@@ -1,14 +1,16 @@
 """Routes API pour la gestion des documents."""
 import logging
+import mimetypes
 import uuid
 from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from app.api.auth import require_auth
 from app.schemas.document import DocumentResponse, ProcessingStatus, UploadedDocument
+from app.services.cloudinary_storage import upload_document_bytes
 from app.services.pipeline import curate_all_documents, process_document
 from app.storage import datalake
 
@@ -16,7 +18,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
 UPLOAD_DIR = Path("./storage/bronze")
-ALLOWED_MIME = {"application/pdf"}
+ALLOWED_MIME = {
+    "application/pdf",
+    "image/jpeg",
+    "image/jpg",
+    "image/png",
+    "image/webp",
+}
 
 
 def _is_admin(payload: dict) -> bool:
@@ -40,13 +48,32 @@ def _user_owns(document_id: uuid.UUID, user_id: str, user_email: str | None = No
     return False
 
 
+def _guess_mime_type(file: UploadFile) -> str:
+    content_type = (file.content_type or "").lower().strip()
+    if content_type in ALLOWED_MIME:
+        return content_type
+
+    guessed, _ = mimetypes.guess_type(file.filename or "")
+    guessed = (guessed or "").lower().strip()
+    if guessed in ALLOWED_MIME:
+        return guessed
+
+    return content_type or "application/octet-stream"
+
+
+def _default_filename_for_mime(mime_type: str) -> str:
+    if mime_type.startswith("image/"):
+        return "document-image.png"
+    return "document.pdf"
+
+
 @router.post("/upload", status_code=status.HTTP_201_CREATED)
 async def upload_documents(
     files: list[UploadFile],
     background_tasks: BackgroundTasks,
     payload: dict = Depends(require_auth),
 ) -> list[DocumentResponse]:
-    """Upload un ou plusieurs fichiers PDF et lance leur traitement en arrière-plan."""
+    """Upload un ou plusieurs fichiers (PDF/images) et lance leur traitement en arrière-plan."""
     if not files:
         raise HTTPException(status_code=400, detail="Aucun fichier fourni")
 
@@ -56,24 +83,49 @@ async def upload_documents(
     user_display: str = payload.get("full_name") or payload.get("email", user_id)
 
     for file in files:
-        if file.content_type not in ALLOWED_MIME:
+        mime_type = _guess_mime_type(file)
+        if mime_type not in ALLOWED_MIME:
             raise HTTPException(
                 status_code=415,
                 detail=(
-                    f"Type de fichier non supporté : {file.content_type}."
-                    " Seuls les PDF sont acceptés."
+                    f"Type de fichier non supporté : {file.content_type or 'inconnu'}."
+                    " Types acceptés : PDF, JPG, PNG, WEBP."
                 ),
             )
 
         content = await file.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="Le fichier uploadé est vide")
+
         doc_id = uuid.uuid4()
-        safe_filename = f"{doc_id}_{file.filename}"
+        original_filename = (
+            Path(file.filename).name
+            if file.filename
+            else _default_filename_for_mime(mime_type)
+        )
+        safe_filename = f"{doc_id}_{original_filename}"
+
+        try:
+            cloudinary_result = upload_document_bytes(
+                content,
+                document_id=doc_id,
+                original_filename=original_filename,
+                mime_type=mime_type,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Impossible d'uploader vers Cloudinary: {exc}",
+            ) from exc
 
         document = UploadedDocument(
             id=doc_id,
             filename=safe_filename,
-            original_filename=file.filename or "document.pdf",
+            original_filename=original_filename,
             file_size=len(content),
+            mime_type=mime_type,
+            cloudinary_url=cloudinary_result.url,
+            cloudinary_public_id=cloudinary_result.public_id,
             owner_id=user_id,
             uploaded_by=user_display,
         )
@@ -87,7 +139,10 @@ async def upload_documents(
             filename=document.filename,
             original_filename=document.original_filename,
             status=ProcessingStatus.UPLOADED,
+            mime_type=document.mime_type,
+            cloudinary_url=document.cloudinary_url,
             upload_at=document.upload_at,
+            uploaded_by=document.uploaded_by,
         ))
 
     return responses
@@ -107,10 +162,10 @@ async def list_documents(payload: dict = Depends(require_auth)) -> list[Document
     user_id: str = payload["sub"]
     is_admin = _is_admin(payload)
 
-    # Construire les maps depuis les bronze records (source de vérité pour upload)
+    # Construire une map doc_id -> document Bronze pour enrichir les reponses.
     bronze_records = datalake.load_all_bronze()
-    bronze_map: dict[str, str] = {
-        str(b.document.id): (b.document.uploaded_by or "")
+    bronze_map: dict[str, UploadedDocument] = {
+        str(b.document.id): b.document
         for b in bronze_records
     }
     owner_map: dict[str, str] = {
@@ -136,6 +191,7 @@ async def list_documents(payload: dict = Depends(require_auth)) -> list[Document
 
     for gold in gold_records:
         doc_id_str = str(gold.document_id)
+        bronze_doc = bronze_map.get(doc_id_str)
         if owned_ids is not None and doc_id_str not in owned_ids:
             continue
         processed_ids.add(doc_id_str)
@@ -146,11 +202,15 @@ async def list_documents(payload: dict = Depends(require_auth)) -> list[Document
             status=ProcessingStatus.CURATED,
             document_type=gold.document_type,
             upload_at=upload_at_map.get(doc_id_str, gold.curated_at),
-            uploaded_by=bronze_map.get(doc_id_str),
+            mime_type=bronze_doc.mime_type if bronze_doc else None,
+            cloudinary_url=bronze_doc.cloudinary_url if bronze_doc else None,
+            uploaded_by=bronze_doc.uploaded_by if bronze_doc else None,
+            upload_at=upload_at_map.get(doc_id_str, gold.curated_at),
         ))
 
     for silver in silver_records:
         doc_id_str = str(silver.document_id)
+        bronze_doc = bronze_map.get(doc_id_str)
         if doc_id_str in processed_ids:
             continue
         if owned_ids is not None and doc_id_str not in owned_ids:
@@ -163,7 +223,10 @@ async def list_documents(payload: dict = Depends(require_auth)) -> list[Document
             status=ProcessingStatus.EXTRACTED,
             document_type=silver.document_type,
             upload_at=upload_at_map.get(doc_id_str, silver.processed_at),
-            uploaded_by=bronze_map.get(doc_id_str),
+            mime_type=bronze_doc.mime_type if bronze_doc else None,
+            cloudinary_url=bronze_doc.cloudinary_url if bronze_doc else None,
+            uploaded_by=bronze_doc.uploaded_by if bronze_doc else None,
+            upload_at=upload_at_map.get(doc_id_str, silver.processed_at),
         ))
 
     # Inclure les Bronze (encore en cours de traitement)
@@ -178,6 +241,8 @@ async def list_documents(payload: dict = Depends(require_auth)) -> list[Document
             filename=bronze.document.filename,
             original_filename=bronze.document.original_filename,
             status=bronze.document.status,
+            mime_type=bronze.document.mime_type,
+            cloudinary_url=bronze.document.cloudinary_url,
             upload_at=bronze.document.upload_at,
             uploaded_by=bronze.document.uploaded_by,
         ))
@@ -192,6 +257,8 @@ async def get_document(
     payload: dict = Depends(require_auth),
 ) -> DocumentResponse:
     user_id: str = payload["sub"]
+    bronze = datalake.load_bronze(document_id)
+    bronze_doc = bronze.document if bronze else None
     user_email: str | None = payload.get("email")
 
     if not _is_admin(payload) and not _user_owns(document_id, user_id, user_email):
@@ -205,7 +272,10 @@ async def get_document(
             original_filename=gold.original_filename,
             status=ProcessingStatus.CURATED,
             document_type=gold.document_type,
+            mime_type=bronze_doc.mime_type if bronze_doc else None,
+            cloudinary_url=bronze_doc.cloudinary_url if bronze_doc else None,
             upload_at=gold.curated_at,
+            uploaded_by=bronze_doc.uploaded_by if bronze_doc else None,
         )
 
     silver = datalake.load_silver(document_id)
@@ -216,20 +286,68 @@ async def get_document(
             original_filename=silver.original_filename,
             status=ProcessingStatus.EXTRACTED,
             document_type=silver.document_type,
+            mime_type=bronze_doc.mime_type if bronze_doc else None,
+            cloudinary_url=bronze_doc.cloudinary_url if bronze_doc else None,
             upload_at=silver.processed_at,
+            uploaded_by=bronze_doc.uploaded_by if bronze_doc else None,
         )
 
-    bronze = datalake.load_bronze(document_id)
     if bronze:
         return DocumentResponse(
             id=bronze.document.id,
             filename=bronze.document.filename,
             original_filename=bronze.document.original_filename,
-            status=ProcessingStatus.UPLOADED,
+            status=bronze.document.status,
+            mime_type=bronze.document.mime_type,
+            cloudinary_url=bronze.document.cloudinary_url,
             upload_at=bronze.document.upload_at,
+            uploaded_by=bronze.document.uploaded_by,
         )
 
+    if not _is_admin(payload):
+        raise HTTPException(status_code=403, detail="Accès refusé")
+
     raise HTTPException(status_code=404, detail=f"Document '{document_id}' non trouvé")
+
+
+@router.get("/{document_id}/file")
+async def get_document_file(
+    document_id: uuid.UUID,
+    payload: dict = Depends(require_auth),
+) -> FileResponse:
+    user_id: str = payload["sub"]
+    user_email: str | None = payload.get("email")
+    bronze = datalake.load_bronze(document_id)
+    if not _is_admin(payload):
+        if not _user_owns(document_id, user_id, user_email):
+            raise HTTPException(status_code=403, detail="Accès refusé")
+
+    if not bronze:
+        raise HTTPException(status_code=404, detail="Document non trouvé")
+
+    if not bronze.document.cloudinary_url:
+        raise HTTPException(
+            status_code=404,
+            detail="Lien Cloudinary manquant pour ce document",
+        )
+
+    file_path = Path(bronze.file_path)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Fichier document introuvable")
+
+    inline_name = Path(bronze.document.original_filename or file_path.name).name
+    media_type = (
+        bronze.document.mime_type
+        or mimetypes.guess_type(inline_name)[0]
+        or "application/octet-stream"
+    )
+
+    return FileResponse(
+        path=str(file_path),
+        media_type=media_type,
+        filename=inline_name,
+        headers={"Content-Disposition": f'inline; filename="{inline_name}"'},
+    )
 
 
 @router.get("/{document_id}/extraction")

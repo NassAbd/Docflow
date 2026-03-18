@@ -6,10 +6,12 @@ import shutil
 from pathlib import Path
 
 from pdf2image import convert_from_bytes, convert_from_path
+from PIL import Image
 from pypdf import PdfReader
 from pytesseract import image_to_string
 
 logger = logging.getLogger(__name__)
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
 class OcrResult:
@@ -118,3 +120,33 @@ def extract_text_from_bytes(pdf_bytes: bytes, lang: str = "fra") -> OcrResult:
     except Exception as exc:
         logger.error("Erreur lors de l'extraction de texte PDF via bytes : %s", exc)
         return OcrResult(text="", page_count=0, success=False, error=str(exc))
+
+
+def extract_text_from_image_path(image_path: Path, lang: str = "fra") -> OcrResult:
+    """Extrait le texte d'une image via Tesseract."""
+    if not shutil.which("tesseract"):
+        err_msg = "Dépendance système manquante pour l'OCR image : tesseract-ocr"
+        logger.error(err_msg)
+        return OcrResult(text="", page_count=0, success=False, error=err_msg)
+
+    try:
+        with Image.open(image_path) as image:
+            text = image_to_string(image, lang=lang)
+        return OcrResult(text=text.strip(), page_count=1)
+    except Exception as exc:
+        logger.error("Erreur OCR image sur '%s' : %s", image_path, exc)
+        return OcrResult(text="", page_count=0, success=False, error=str(exc))
+
+
+def extract_text_from_file_path(
+    file_path: Path,
+    mime_type: str | None = None,
+    lang: str = "fra",
+) -> OcrResult:
+    """Extrait le texte depuis un fichier PDF ou image en fonction du MIME type."""
+    normalized_mime = (mime_type or "").lower().strip()
+
+    if normalized_mime.startswith("image/") or file_path.suffix.lower() in IMAGE_EXTENSIONS:
+        return extract_text_from_image_path(file_path, lang=lang)
+
+    return extract_text_from_pdf_path(file_path, lang=lang)

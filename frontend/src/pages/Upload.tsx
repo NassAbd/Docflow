@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { uploadDocuments, listDocuments, getExtraction, deleteDocument } from '../api/client';
+import {
+  uploadDocuments,
+  listDocuments,
+  getExtraction,
+  deleteDocument,
+  getDocumentFileBlob,
+} from '../api/client';
 import type { DocumentResponse, ExtractionResult } from '../types';
 import { useAuth } from '../context/AuthContext';
 
@@ -17,6 +23,26 @@ const TYPE_LABELS: Record<string, string> = {
   attestation: 'Attestation',
   autre: 'Autre',
 };
+
+const ACCEPTED_MIME_TYPES = new Set([
+  'application/pdf',
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/webp',
+]);
+
+const ACCEPTED_EXTENSIONS = ['.pdf', '.jpg', '.jpeg', '.png', '.webp'];
+
+function isSupportedFile(file: File): boolean {
+  const mime = (file.type || '').toLowerCase();
+  if (ACCEPTED_MIME_TYPES.has(mime)) {
+    return true;
+  }
+
+  const lowerName = file.name.toLowerCase();
+  return ACCEPTED_EXTENSIONS.some((ext) => lowerName.endsWith(ext));
+}
 
 export function UploadPage() {
   const { user } = useAuth();
@@ -50,12 +76,21 @@ export function UploadPage() {
   }, []);
 
   const handleFiles = async (files: FileList) => {
-    const pdfs = Array.from(files).filter((f) => f.type === 'application/pdf');
-    if (pdfs.length === 0) return;
+    const allFiles = Array.from(files);
+    const supportedFiles = allFiles.filter(isSupportedFile);
+
+    if (supportedFiles.length === 0) {
+      alert('Formats acceptés: PDF, JPG, PNG, WEBP');
+      return;
+    }
+
+    if (supportedFiles.length !== allFiles.length) {
+      alert('Certains fichiers non supportés ont été ignorés.');
+    }
 
     setUploading(true);
     try {
-      const result = await uploadDocuments(pdfs);
+      const result = await uploadDocuments(supportedFiles);
       setUploadedFiles(result.map((d) => d.original_filename));
       await refreshDocuments();
     } catch (err) {
@@ -78,8 +113,14 @@ export function UploadPage() {
   };
 
   const openDetails = async (doc: DocumentResponse) => {
-    if (!['extracted', 'curated'].includes(doc.status)) return;
     setSelectedDoc(doc);
+    setExtraction(null);
+
+    if (!['extracted', 'curated'].includes(doc.status)) {
+      setLoadingExtraction(false);
+      return;
+    }
+
     setLoadingExtraction(true);
     try {
       const result = await getExtraction(doc.id);
@@ -94,6 +135,33 @@ export function UploadPage() {
   const closeDetails = () => {
     setSelectedDoc(null);
     setExtraction(null);
+  };
+
+  const openDocumentFile = async (doc: DocumentResponse) => {
+    if (!doc.cloudinary_url) {
+      alert('Lien Cloudinary indisponible pour ce document');
+      return;
+    }
+
+    const popup = window.open('', '_blank');
+    if (!popup) {
+      alert('Popup bloquée. Autorisez les popups pour ouvrir le document.');
+      return;
+    }
+
+    popup.document.title = 'Chargement du document...';
+    popup.document.body.innerHTML = '<p style="font-family: sans-serif; padding: 1rem;">Chargement du document...</p>';
+
+    try {
+      const blob = await getDocumentFileBlob(doc.id);
+      const blobUrl = URL.createObjectURL(blob);
+      popup.location.href = blobUrl;
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+    } catch (err) {
+      console.error('Open document error:', err);
+      popup.close();
+      alert('Impossible d’ouvrir le document');
+    }
   };
 
   const handleDelete = async (id: string) => {
@@ -136,7 +204,7 @@ export function UploadPage() {
           ref={inputRef}
           type="file"
           multiple
-          accept=".pdf,application/pdf"
+          accept=".pdf,.jpg,.jpeg,.png,.webp,application/pdf,image/jpeg,image/png,image/webp"
           style={{ display: 'none' }}
           onChange={(e) => e.target.files && handleFiles(e.target.files)}
         />
@@ -145,7 +213,7 @@ export function UploadPage() {
           <>
             <span className="drop-zone-icon">⏳</span>
             <h2 className="loading-text">Upload en cours…</h2>
-            <p>Vos fichiers sont en cours de transfert vers la zone Bronze</p>
+            <p>Vos fichiers sont en cours de transfert vers le stockage sécurisé (Cloudinary)</p>
             <div className="progress-bar center">
               <div className="progress-fill" style={{ width: '100%' }} />
             </div>
@@ -153,8 +221,8 @@ export function UploadPage() {
         ) : (
           <>
             <span className="drop-zone-icon">☁️</span>
-            <h2>Déposez vos PDF ici</h2>
-            <p>ou cliquez pour sélectionner — Formats acceptés : PDF uniquement</p>
+            <h2>Déposez vos documents ici</h2>
+            <p>ou cliquez pour sélectionner — Formats acceptés : PDF, JPG, PNG, WEBP</p>
             <div className="mt-5">
               <button id="upload-btn" className="btn btn-primary">
                 📂 Choisir des fichiers
@@ -185,8 +253,8 @@ export function UploadPage() {
           </div>
           
           <p className="text-sm text-muted mt-2">
-            Les fichiers sont maintenant en sécurité dans les différentes zones de traitement
-            (Bronze, Silver & Gold).
+            Les fichiers sont stockés sur Cloudinary, puis traités dans le pipeline
+            Bronze, Silver et Gold.
           </p>
         </div>
       )}
@@ -203,7 +271,7 @@ export function UploadPage() {
         <div className="empty-state">
           <span className="empty-state-icon">📭</span>
           <h3>Aucun document encore</h3>
-          <p>Uploadez vos premiers PDF pour démarrer le traitement</p>
+          <p>Uploadez vos premiers documents pour démarrer le traitement</p>
         </div>
       ) : (
         <div className="table-container">
@@ -258,8 +326,7 @@ export function UploadPage() {
                   <td>
                     <div className="flex gap-1">
                       <button 
-                        className="btn btn-ghost btn-xs" 
-                        disabled={!['extracted', 'curated'].includes(doc.status)}
+                        className="btn btn-ghost btn-xs"
                         onClick={() => openDetails(doc)}
                       >
                         👁️ Voir
@@ -290,7 +357,20 @@ export function UploadPage() {
                 </span>
                 <h2 className="text-lg font-bold">{selectedDoc.original_filename}</h2>
               </div>
-              <button className="modal-close" onClick={closeDetails}>&times;</button>
+              <div className="flex items-center gap-1">
+                {selectedDoc.cloudinary_url ? (
+                  <button
+                    className="btn btn-ghost"
+                    style={{ padding: '0.35rem 0.6rem', fontSize: '0.75rem' }}
+                    onClick={() => openDocumentFile(selectedDoc)}
+                  >
+                    ↗ Ouvrir le document
+                  </button>
+                ) : (
+                  <span className="text-sm text-muted">Lien document indisponible</span>
+                )}
+                <button className="modal-close" onClick={closeDetails}>&times;</button>
+              </div>
             </div>
             {isAdmin && (
               <div style={{ padding: '0.75rem 1.5rem', borderBottom: '1px solid var(--color-border)', display: 'flex', gap: '2rem', background: 'rgba(255,255,255,0.02)' }}>
@@ -310,7 +390,7 @@ export function UploadPage() {
                   <div className="spinner" />
                   <span>Chargement des données extraites…</span>
                 </div>
-              ) : extraction ? (
+              ) : ['extracted', 'curated'].includes(selectedDoc.status) && extraction ? (
                 <div className="flex-col gap-2">
                   <div className="grid-2">
                     <div className="card-glass">
@@ -359,8 +439,27 @@ export function UploadPage() {
                     </pre>
                   </div>
                 </div>
+              ) : ['extracted', 'curated'].includes(selectedDoc.status) ? (
+                <p>Impossible de charger les données extraites.</p>
               ) : (
-                <p>Impossible de charger les données.</p>
+                <div className="card-glass" style={{ display: 'grid', gap: '0.75rem' }}>
+                  <p className="text-sm text-muted">Ce document est encore en cours de traitement.</p>
+                  <p>
+                    Vous pouvez déjà l'ouvrir pour vérification visuelle,
+                    puis revenir ici quand l'extraction sera disponible.
+                  </p>
+                  {selectedDoc.cloudinary_url ? (
+                    <button
+                      className="btn btn-primary"
+                      style={{ width: 'fit-content' }}
+                      onClick={() => openDocumentFile(selectedDoc)}
+                    >
+                      Ouvrir le document
+                    </button>
+                  ) : (
+                    <span className="text-sm text-muted">Lien document indisponible</span>
+                  )}
+                </div>
               )}
             </div>
             <div className="modal-footer">
