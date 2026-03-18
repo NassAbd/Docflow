@@ -90,6 +90,23 @@ body::after {
   z-index: 0;
 }
 
+body.auth-screen::before,
+body.auth-screen::after {
+  display: none;
+}
+
+/* Auth-only: tweak primary button sheen so it doesn't start on the left */
+body.auth-screen .btn-primary::before {
+  background: radial-gradient(circle at 80% 20%, rgba(255, 255, 255, 0.72), transparent 48%);
+  transform: translateX(28%) rotate(-12deg);
+  opacity: 0.5;
+}
+
+body.auth-screen .btn-primary:hover::before {
+  transform: translateX(-18%) rotate(-12deg);
+  opacity: 0.65;
+}
+
 #root {
   position: relative;
   z-index: 1;
@@ -447,6 +464,7 @@ textarea:focus-visible {
   transform: translateX(-25%) rotate(12deg);
   opacity: 0.35;
   transition: transform 600ms ease, opacity 600ms ease;
+  pointer-events: none;
 }
 
 .btn-primary:hover {
@@ -1126,12 +1144,16 @@ tbody tr:last-child td { border-bottom: none; }
 }
 
 .login-container {
-  min-height: 100vh;
+  position: fixed;
+  inset: 0;
+  z-index: 200;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 2rem;
-  background: radial-gradient(ellipse at 50% 0%, rgba(108,99,255,0.15) 0%, transparent 60%);
+  background:
+    radial-gradient(ellipse at 50% 0%, rgba(108,99,255,0.15) 0%, transparent 60%),
+    var(--color-bg);
 }
 
 .login-card {
