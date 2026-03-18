@@ -301,6 +301,18 @@ export function UploadPage() {
               </div>
               <button className="modal-close" onClick={closeDetails}>&times;</button>
             </div>
+            {isAdmin && (
+              <div style={{ padding: '0.75rem 1.5rem', borderBottom: '1px solid var(--color-border)', display: 'flex', gap: '2rem', background: 'rgba(255,255,255,0.02)' }}>
+                <div>
+                  <span className="text-sm text-muted">Uploadé par </span>
+                  <span className="text-sm" style={{ fontWeight: 600 }}>{selectedDoc.uploaded_by ?? '—'}</span>
+                </div>
+                <div>
+                  <span className="text-sm text-muted">Date d'upload </span>
+                  <span className="text-sm" style={{ fontWeight: 600 }}>{new Date(selectedDoc.upload_at).toLocaleString('fr-FR')}</span>
+                </div>
+              </div>
+            )}
             <div className="modal-body">
               {loadingExtraction ? (
                 <div className="flex items-center justify-center gap-2 p-4">
