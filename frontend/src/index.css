@@ -1136,7 +1136,6 @@ tbody tr:last-child td { border-bottom: none; }
 
 .login-card {
   background:
-    radial-gradient(700px 240px at 20% 0%, rgba(108, 99, 255, 0.16), transparent 55%),
     linear-gradient(var(--color-surface), var(--color-surface)) padding-box,
     linear-gradient(135deg, rgba(108, 99, 255, 0.5), rgba(0, 212, 170, 0.22), rgba(255, 107, 107, 0.18)) border-box;
   border: 1px solid transparent;
@@ -1147,20 +1146,14 @@ tbody tr:last-child td { border-bottom: none; }
   box-shadow: 0 30px 90px rgba(0, 0, 0, 0.32);
   position: relative;
   overflow: hidden;
-}
-
-.login-card::before {
-  content: '';
-  position: absolute;
-  inset: -2px;
-  background: radial-gradient(600px 180px at 50% 0%, rgba(255, 255, 255, 0.06), transparent 60%);
-  pointer-events: none;
+  isolation: isolate;
 }
 
 .login-card > * {
   position: relative;
   z-index: 1;
 }
+
 
 .login-header {
   text-align: center;
