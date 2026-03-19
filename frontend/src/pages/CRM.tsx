@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { getCrmSuppliers, getSupplierDocuments } from '../api/client';
+import { getCrmSuppliers, getMyCrmSuppliers, getSupplierDocuments, getMySupplierDocuments } from '../api/client';
+import { useAuth } from '../context/AuthContext';
 import type { GoldRecord, SupplierSummary } from '../types';
 
 const TYPE_ICONS: Record<string, string> = {
@@ -10,6 +11,8 @@ const TYPE_ICONS: Record<string, string> = {
 };
 
 export function CrmPage() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
   const [suppliers, setSuppliers] = useState<SupplierSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -18,17 +21,17 @@ export function CrmPage() {
   const [loadingDocs, setLoadingDocs] = useState(false);
 
   useEffect(() => {
-    getCrmSuppliers()
+    (isAdmin ? getCrmSuppliers() : getMyCrmSuppliers())
       .then(setSuppliers)
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, []);
+  }, [isAdmin]);
 
   const openSupplier = async (supplier: SupplierSummary) => {
     setSelectedSupplier(supplier);
     setLoadingDocs(true);
     try {
-      const docs = await getSupplierDocuments(supplier.siren);
+      const docs = await (isAdmin ? getSupplierDocuments(supplier.siren) : getMySupplierDocuments(supplier.siren));
       setSupplierDocs(docs);
     } catch (err) {
       console.error('Error fetching supplier docs:', err);
