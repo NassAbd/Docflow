@@ -185,13 +185,32 @@ export async function getCrmSuppliers(): Promise<SupplierSummary[]> {
   return res.data;
 }
 
+export async function getMyCrmSuppliers(): Promise<SupplierSummary[]> {
+  const res = await api.get<SupplierSummary[]>('/api/crm/my-suppliers');
+  return res.data;
+}
+
 export async function getSupplierDocuments(supplierKey: string): Promise<GoldRecord[]> {
-  // encodeURIComponent encode les ":" et espaces → le backend reçoit la clé complète via :path
   const res = await api.get<GoldRecord[]>(`/api/crm/suppliers/${encodeURIComponent(supplierKey)}`);
+  return res.data;
+}
+
+export async function getMySupplierDocuments(supplierKey: string): Promise<GoldRecord[]> {
+  const res = await api.get<GoldRecord[]>(`/api/crm/my-suppliers/${encodeURIComponent(supplierKey)}`);
   return res.data;
 }
 
 export async function getComplianceDashboard(): Promise<ComplianceDashboard> {
   const res = await api.get<ComplianceDashboard>('/api/compliance/dashboard');
+  return res.data;
+}
+
+export async function getMyComplianceDashboard(): Promise<ComplianceDashboard> {
+  const res = await api.get<ComplianceDashboard>('/api/compliance/my-dashboard');
+  return res.data;
+}
+
+export async function listMyAlerts(): Promise<InconsistencyAlert[]> {
+  const res = await api.get<InconsistencyAlert[]>('/api/alerts/my');
   return res.data;
 }
