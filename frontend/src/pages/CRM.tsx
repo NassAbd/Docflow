@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { getCrmSuppliers, getSupplierDocuments } from '../api/client';
+import { getCrmSuppliers, getMyCrmSuppliers, getSupplierDocuments, getMySupplierDocuments } from '../api/client';
+import { useAuth } from '../context/AuthContext';
 import type { GoldRecord, GroupType, SupplierSummary } from '../types';
 
 // ─── Constantes d'affichage ──────────────────────────────────────────────────
@@ -20,6 +21,8 @@ const GROUP_META: Record<GroupType, { icon: string; label: string; badgeClass: s
 // ─── Composant principal ─────────────────────────────────────────────────────
 
 export function CrmPage() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
   const [suppliers, setSuppliers] = useState<SupplierSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -29,18 +32,18 @@ export function CrmPage() {
   const [loadingDocs, setLoadingDocs] = useState(false);
 
   useEffect(() => {
-    getCrmSuppliers()
+    (isAdmin ? getCrmSuppliers() : getMyCrmSuppliers())
       .then(setSuppliers)
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, []);
+  }, [isAdmin]);
 
   const openSupplier = async (supplier: SupplierSummary) => {
     setSelectedSupplier(supplier);
     setLoadingDocs(true);
     setSupplierDocs([]);
     try {
-      const docs = await getSupplierDocuments(supplier.supplier_key);
+      const docs = await (isAdmin ? getSupplierDocuments(supplier.supplier_key) : getMySupplierDocuments(supplier.supplier_key));
       setSupplierDocs(docs);
     } catch (err) {
       console.error('Error fetching supplier docs:', err);

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { getComplianceDashboard, listAlerts } from '../api/client';
+import { getComplianceDashboard, getMyComplianceDashboard, listAlerts, listMyAlerts } from '../api/client';
+import { useAuth } from '../context/AuthContext';
 import type { AlertSeverity, AlertType, ComplianceDashboard, InconsistencyAlert } from '../types';
 
 const ALERT_TYPE_LABELS: Record<AlertType, string> = {
@@ -46,20 +47,25 @@ function ComplianceRing({ value }: { value: number }) {
 }
 
 export function CompliancePage() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
   const [dashboard, setDashboard] = useState<ComplianceDashboard | null>(null);
   const [alerts, setAlerts] = useState<InconsistencyAlert[]>([]);
   const [loading, setLoading] = useState(true);
   const [filterSeverity, setFilterSeverity] = useState<AlertSeverity | 'all'>('all');
 
   useEffect(() => {
-    Promise.all([getComplianceDashboard(), listAlerts()])
+    Promise.all([
+      isAdmin ? getComplianceDashboard() : getMyComplianceDashboard(),
+      isAdmin ? listAlerts() : listMyAlerts(),
+    ])
       .then(([dash, alts]) => {
         setDashboard(dash);
         setAlerts(alts);
       })
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, []);
+  }, [isAdmin]);
 
   const filteredAlerts =
     filterSeverity === 'all'

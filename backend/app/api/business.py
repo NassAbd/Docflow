@@ -1,7 +1,8 @@
 """Routes API pour le CRM fournisseurs et le dashboard conformité."""
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 
-from app.api.auth import require_admin
+from app.api.auth import require_admin, require_auth
 from app.schemas.business import (
     SupplierSummary,
     build_supplier_key,
@@ -10,6 +11,20 @@ from app.schemas.business import (
 from app.schemas.datalake import GoldRecord
 from app.schemas.fraud import AlertSeverity
 from app.storage import datalake
+from app.db.mongodb import get_collection
+
+
+def _get_user_doc_ids(owner_id: str) -> set[str]:
+    """Retourne les IDs des documents appartenant à l'utilisateur."""
+    try:
+        cursor = get_collection("bronze").find(
+            {"document.owner_id": owner_id},
+            {"document.id": 1}
+        )
+        return {doc["document"]["id"] for doc in cursor}
+    except Exception:
+        return set()
+
 
 router = APIRouter(tags=["business"])
 
@@ -18,37 +33,21 @@ router = APIRouter(tags=["business"])
 
 
 def _match_gold_to_key(gold: GoldRecord, supplier_key: str) -> bool:
-    """Retourne True si ce GoldRecord appartient à la supplier_key donnée."""
     return build_supplier_key(gold.extraction.siren, gold.extraction.emetteur_nom) == supplier_key
 
 
-# ─── CRM ─────────────────────────────────────────────────────────────────────
-
-
-@router.get("/api/crm/suppliers", response_model=list[SupplierSummary])
-async def get_crm_suppliers(_: dict = Depends(require_admin)) -> list[SupplierSummary]:
-    """
-    Données CRM : fournisseurs groupés par clé composite.
-
-    Priorité de groupement :
-      1. SIREN connu  → "siren:<siren>"
-      2. Nom seul     → "nom:<nom_normalisé>"
-      3. Ni l'un ni l'autre → "inconnu"
-    """
-    gold_records = datalake.load_all_gold()
+def _build_supplier_summaries(gold_records: list[GoldRecord]) -> list[SupplierSummary]:
+    """Construit la liste des fournisseurs groupés par clé composite."""
     suppliers: dict[str, dict] = {}
-
     for gold in gold_records:
         ext = gold.extraction
         key = build_supplier_key(ext.siren, ext.emetteur_nom)
         nom = (ext.emetteur_nom or "").strip() or "Émetteur inconnu"
-
         if key not in suppliers:
             suppliers[key] = {
                 "supplier_key": key,
                 "group_type": group_type_of(key),
                 "siren": ext.siren,
-                # On conserve le premier nom non-vide rencontré
                 "nom": nom,
                 "nombre_documents": 0,
                 "total_ttc": 0.0,
@@ -56,10 +55,8 @@ async def get_crm_suppliers(_: dict = Depends(require_admin)) -> list[SupplierSu
                 "types_documents": set(),
             }
         else:
-            # Si le nom d'affichage était générique, on le remplace
             if suppliers[key]["nom"] == "Émetteur inconnu" and nom != "Émetteur inconnu":
                 suppliers[key]["nom"] = nom
-
         s = suppliers[key]
         s["nombre_documents"] += 1
         if ext.montants.ttc:
@@ -68,10 +65,8 @@ async def get_crm_suppliers(_: dict = Depends(require_admin)) -> list[SupplierSu
             s["a_des_alertes"] = True
         s["types_documents"].add(gold.document_type.value)
 
-    # Tri : SIREN d'abord, puis nom, puis inconnu
     order = {"siren": 0, "nom": 1, "inconnu": 2}
     sorted_suppliers = sorted(suppliers.values(), key=lambda v: (order[v["group_type"]], v["nom"]))
-
     return [
         SupplierSummary(
             supplier_key=v["supplier_key"],
@@ -87,40 +82,55 @@ async def get_crm_suppliers(_: dict = Depends(require_admin)) -> list[SupplierSu
     ]
 
 
+# ─── CRM ─────────────────────────────────────────────────────────────────────
+
+
+@router.get("/api/crm/suppliers", response_model=list[SupplierSummary])
+async def get_crm_suppliers(_: dict = Depends(require_admin)) -> list[SupplierSummary]:
+    """Données CRM admin : tous les fournisseurs groupés par clé composite."""
+    return _build_supplier_summaries(datalake.load_all_gold())
+
+
+@router.get("/api/crm/my-suppliers", response_model=list[SupplierSummary])
+async def get_my_crm_suppliers(payload: dict = Depends(require_auth)) -> list[SupplierSummary]:
+    """Données CRM utilisateur : fournisseurs de ses propres documents."""
+    owner_id = payload["sub"]
+    doc_ids = _get_user_doc_ids(owner_id)
+    gold_records = [g for g in datalake.load_all_gold() if str(g.document_id) in doc_ids]
+    return _build_supplier_summaries(gold_records)
+
+
 @router.get("/api/crm/suppliers/{supplier_key:path}", response_model=list[GoldRecord])
 async def get_supplier_documents(
     supplier_key: str,
     _: dict = Depends(require_admin),
 ) -> list[GoldRecord]:
-    """
-    Historique de tous les documents Gold associés à une supplier_key composite.
-
-    La supplier_key peut être :
-      - "siren:123456789"
-      - "nom:acme sa"
-      - "inconnu"
-    """
+    """Historique de tous les documents Gold d'une supplier_key composite (admin)."""
     if not supplier_key:
         raise HTTPException(status_code=400, detail="supplier_key invalide")
-
     gold_records = datalake.load_all_gold()
-    matched = [
-        g for g in gold_records if _match_gold_to_key(g, supplier_key)
-    ]
+    matched = [g for g in gold_records if _match_gold_to_key(g, supplier_key)]
+    matched.sort(key=lambda g: g.curated_at, reverse=True)
+    return matched
 
-    # Tri anti-chronologique pour l'historique
+
+@router.get("/api/crm/my-suppliers/{supplier_key:path}", response_model=list[GoldRecord])
+async def get_my_supplier_documents(
+    supplier_key: str,
+    payload: dict = Depends(require_auth),
+) -> list[GoldRecord]:
+    """Documents Gold d'une supplier_key pour l'utilisateur connecté."""
+    if not supplier_key:
+        raise HTTPException(status_code=400, detail="supplier_key invalide")
+    owner_id = payload["sub"]
+    doc_ids = _get_user_doc_ids(owner_id)
+    gold_records = datalake.load_all_gold()
+    matched = [g for g in gold_records if _match_gold_to_key(g, supplier_key) and str(g.document_id) in doc_ids]
     matched.sort(key=lambda g: g.curated_at, reverse=True)
     return matched
 
 
 # ─── Conformité ───────────────────────────────────────────────────────────────
-
-
-class ComplianceDashboard:
-    pass  # Voir ci-dessous — on réutilise le modèle inline
-
-
-from pydantic import BaseModel  # noqa: E402
 
 
 class ComplianceDashboardSchema(BaseModel):
@@ -134,16 +144,11 @@ class ComplianceDashboardSchema(BaseModel):
     alertes_totales: int
 
 
-@router.get("/api/compliance/dashboard", response_model=ComplianceDashboardSchema)
-async def get_compliance_dashboard(_: dict = Depends(require_admin)) -> ComplianceDashboardSchema:
-    """Dashboard conformité : métriques globales sur l'ensemble des documents."""
-    gold_records = datalake.load_all_gold()
+def _build_compliance_dashboard(gold_records: list[GoldRecord]) -> ComplianceDashboardSchema:
     total = len(gold_records)
     conformes = sum(1 for g in gold_records if g.is_compliant)
-
     seen_ids: set[str] = set()
     critiques = hautes = moyennes = 0
-
     for gold in gold_records:
         for alert in gold.alerts:
             if alert.id not in seen_ids:
@@ -154,7 +159,6 @@ async def get_compliance_dashboard(_: dict = Depends(require_admin)) -> Complian
                     hautes += 1
                 elif alert.severity == AlertSeverity.MOYENNE:
                     moyennes += 1
-
     return ComplianceDashboardSchema(
         total_documents=total,
         documents_conformes=conformes,
@@ -165,3 +169,18 @@ async def get_compliance_dashboard(_: dict = Depends(require_admin)) -> Complian
         alertes_moyennes=moyennes,
         alertes_totales=len(seen_ids),
     )
+
+
+@router.get("/api/compliance/dashboard", response_model=ComplianceDashboardSchema)
+async def get_compliance_dashboard(_: dict = Depends(require_admin)) -> ComplianceDashboardSchema:
+    """Dashboard conformité admin : métriques globales."""
+    return _build_compliance_dashboard(datalake.load_all_gold())
+
+
+@router.get("/api/compliance/my-dashboard", response_model=ComplianceDashboardSchema)
+async def get_my_compliance_dashboard(payload: dict = Depends(require_auth)) -> ComplianceDashboardSchema:
+    """Dashboard conformité utilisateur : métriques de ses propres documents."""
+    owner_id = payload["sub"]
+    doc_ids = _get_user_doc_ids(owner_id)
+    gold_records = [g for g in datalake.load_all_gold() if str(g.document_id) in doc_ids]
+    return _build_compliance_dashboard(gold_records)

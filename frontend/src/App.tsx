@@ -15,13 +15,6 @@ function ProtectedRoute({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
-function AdminRoute({ children }: { children: ReactNode }) {
-  const { user, loading } = useAuth();
-  if (loading) return <div className="loading-screen">Chargement...</div>;
-  if (!user) return <Navigate to="/login" replace />;
-  if (user.role !== 'admin') return <Navigate to="/" replace />;
-  return <>{children}</>;
-}
 
 function AppRoutes() {
   const { user, loading } = useAuth();
@@ -34,8 +27,8 @@ function AppRoutes() {
         <Routes>
           <Route path="/login" element={user ? <Navigate to="/" replace /> : <LoginPage />} />
           <Route path="/" element={<ProtectedRoute><UploadPage /></ProtectedRoute>} />
-          <Route path="/crm" element={<AdminRoute><CrmPage /></AdminRoute>} />
-          <Route path="/compliance" element={<AdminRoute><CompliancePage /></AdminRoute>} />
+          <Route path="/crm" element={<ProtectedRoute><CrmPage /></ProtectedRoute>} />
+          <Route path="/compliance" element={<ProtectedRoute><CompliancePage /></ProtectedRoute>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>

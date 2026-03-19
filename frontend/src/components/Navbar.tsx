@@ -60,22 +60,18 @@ export function Navbar() {
         >
           ⬆️ Upload
         </NavLink>
-        {isAdmin && (
-          <>
-            <NavLink
-              to="/crm"
-              className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}
-            >
-              🏢 CRM
-            </NavLink>
-            <NavLink
-              to="/compliance"
-              className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}
-            >
-              🛡️ Conformité
-            </NavLink>
-          </>
-        )}
+        <NavLink
+          to="/crm"
+          className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}
+        >
+          🏢 CRM
+        </NavLink>
+        <NavLink
+          to="/compliance"
+          className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}
+        >
+          🛡️ Conformité
+        </NavLink>
       </div>
       {user && (
         <div className="navbar-user">
